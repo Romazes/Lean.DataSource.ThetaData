@@ -18,6 +18,7 @@ using QuantConnect.Data;
 using QuantConnect.Util;
 using QuantConnect.Securities;
 using System.Collections.Concurrent;
+using QuantConnect.Logging;
 
 namespace QuantConnect.Lean.DataSource.ThetaData
 {
@@ -89,52 +90,48 @@ namespace QuantConnect.Lean.DataSource.ThetaData
         private IEnumerable<BaseData>? GetCanonicalOptionHistory(Symbol symbol, DateTime startUtc, DateTime endUtc, Type dataType,
             Resolution resolution, SecurityExchangeHours exchangeHours, DateTimeZone dataTimeZone, TickType tickType)
         {
-            var blockingOptionCollection = new BlockingCollection<BaseData>();
-            var symbols = GetOptions(symbol, startUtc, endUtc);
+            var optionContracts = GetOptions(symbol, startUtc, endUtc).ToList();
 
-            // Symbol can have a lot of Option parameters
-            Task.Run(() => Parallel.ForEach(symbols, targetSymbol =>
+            Log.Debug($"OptionContract.Count: {optionContracts.Count()}");
+
+            foreach (var option in optionContracts)
             {
-                var historyRequest = new HistoryRequest(startUtc, endUtc, dataType, targetSymbol, resolution, exchangeHours, dataTimeZone,
+                var historyRequest = new HistoryRequest(startUtc, endUtc, dataType, option, resolution, exchangeHours, dataTimeZone,
                     resolution, true, false, DataNormalizationMode.Raw, tickType);
 
-                var history = _historyProvider.GetHistory(historyRequest);
+                var historyBulkData = _historyProvider.DownloadHistoryBulkData(historyRequest);
 
-                // If history is null, it indicates an incorrect or missing request for historical data,
-                // so we skip processing for this symbol and move to the next one.
-                if (history == null)
+                if (historyBulkData == null)
                 {
-                    return;
+                    continue;
                 }
 
-                foreach (var data in history)
+                foreach (var history in historyBulkData)
                 {
-                    blockingOptionCollection.Add(data);
+                    yield return history;
                 }
-            })).ContinueWith(_ =>
-            {
-                blockingOptionCollection.CompleteAdding();
-            });
-
-            var options = blockingOptionCollection.GetConsumingEnumerable();
-
-            // Validate if the collection contains at least one successful response from history.
-            if (!options.Any())
-            {
-                return null;
             }
-
-            return options;
         }
 
         protected virtual IEnumerable<Symbol> GetOptions(Symbol symbol, DateTime startUtc, DateTime endUtc)
         {
             var exchangeHours = _marketHoursDatabase.GetExchangeHours(symbol.ID.Market, symbol, symbol.SecurityType);
+            var blockingOptionCollection = new ConcurrentDictionary<DateTime, Symbol>();
 
-            return Time.EachTradeableDay(exchangeHours, startUtc.Date, endUtc.Date)
-                .Select(date => _historyProvider.GetOptionChain(symbol, date))
-                .SelectMany(x => x)
-                .Distinct();
+            Parallel.ForEach(Time.EachTradeableDay(exchangeHours, startUtc.Date, endUtc.Date), tradeableDay =>
+            {
+                foreach (var optionByDate in _historyProvider.GetOptionChain(symbol, tradeableDay))
+                {
+                    blockingOptionCollection.TryAdd(optionByDate.ID.Date, optionByDate);
+                }
+            });
+
+            var options = blockingOptionCollection.GetEnumerator();
+
+            while (options.MoveNext())
+            {
+                yield return options.Current.Value;
+            }
         }
 
         /// <summary>

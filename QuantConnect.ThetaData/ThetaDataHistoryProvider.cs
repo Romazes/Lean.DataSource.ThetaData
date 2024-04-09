@@ -91,52 +91,8 @@ namespace QuantConnect.Lean.DataSource.ThetaData
 
         public IEnumerable<BaseData>? GetHistory(HistoryRequest historyRequest)
         {
-            if (!_userSubscriptionPlan.AccessibleResolutions.Contains(historyRequest.Resolution))
+            if (!ValidateHistoryRequest(historyRequest))
             {
-                if (!_invalidSubscriptionResolutionRequestWarningFired)
-                {
-                    _invalidSubscriptionResolutionRequestWarningFired = true;
-                    Log.Trace($"{nameof(ThetaDataProvider)}.{nameof(GetHistory)}: The current user's subscription plan does not support the requested resolution: {historyRequest.Resolution}");
-                }
-                return null;
-            }
-
-            if (_userSubscriptionPlan.FirstAccessDate.Date > historyRequest.StartTimeUtc.Date)
-            {
-                if (!_invalidStartDateInCurrentSubscriptionWarningFired)
-                {
-                    _invalidStartDateInCurrentSubscriptionWarningFired = true;
-                    Log.Trace($"{nameof(ThetaDataProvider)}.{nameof(GetHistory)}: The requested start time ({historyRequest.StartTimeUtc.Date}) exceeds the maximum available date ({_userSubscriptionPlan.FirstAccessDate.Date}) allowed by the user's subscription.");
-                }
-            }
-
-            if (!CanSubscribe(historyRequest.Symbol))
-            {
-                if (!_invalidSecurityTypeWarningFired)
-                {
-                    _invalidSecurityTypeWarningFired = true;
-                    Log.Trace($"{nameof(ThetaDataProvider)}.{nameof(GetHistory)}: Unsupported SecurityType '{historyRequest.Symbol.SecurityType}' for symbol '{historyRequest.Symbol}'");
-                }
-                return null;
-            }
-
-            if (historyRequest.StartTimeUtc >= historyRequest.EndTimeUtc)
-            {
-                if (!_invalidStartTimeWarningFired)
-                {
-                    _invalidStartTimeWarningFired = true;
-                    Log.Error($"{nameof(ThetaDataProvider)}.{nameof(GetHistory)}: Error - The start date in the history request must come before the end date. No historical data will be returned.");
-                }
-                return null;
-            }
-
-            if (historyRequest.Symbol.SecurityType == SecurityType.Option && historyRequest.TickType == TickType.OpenInterest && historyRequest.Resolution != Resolution.Daily)
-            {
-                if (!_invalidOpenInterestWarningFired)
-                {
-                    _invalidOpenInterestWarningFired = true;
-                    Log.Trace($"Invalid data request: TickType 'OpenInterest' only supports Resolution 'Daily' and SecurityType 'Option'. Requested: Resolution '{historyRequest.Resolution}', SecurityType '{historyRequest.Symbol.SecurityType}'.");
-                }
                 return null;
             }
 
@@ -155,6 +111,130 @@ namespace QuantConnect.Lean.DataSource.ThetaData
             }
 
             return null;
+        }
+
+        public bool ValidateHistoryRequest(HistoryRequest historyRequest)
+        {
+            if (!_userSubscriptionPlan.AccessibleResolutions.Contains(historyRequest.Resolution))
+            {
+                if (!_invalidSubscriptionResolutionRequestWarningFired)
+                {
+                    _invalidSubscriptionResolutionRequestWarningFired = true;
+                    Log.Trace($"{nameof(ThetaDataProvider)}.{nameof(ValidateHistoryRequest)}: The current user's subscription plan does not support the requested resolution: {historyRequest.Resolution}");
+                }
+                return false;
+            }
+
+            if (_userSubscriptionPlan.FirstAccessDate.Date > historyRequest.StartTimeUtc.Date)
+            {
+                if (!_invalidStartDateInCurrentSubscriptionWarningFired)
+                {
+                    _invalidStartDateInCurrentSubscriptionWarningFired = true;
+                    Log.Trace($"{nameof(ThetaDataProvider)}.{nameof(ValidateHistoryRequest)}: The requested start time ({historyRequest.StartTimeUtc.Date}) exceeds the maximum available date ({_userSubscriptionPlan.FirstAccessDate.Date}) allowed by the user's subscription.");
+                }
+            }
+
+            if (!CanSubscribe(historyRequest.Symbol))
+            {
+                if (!_invalidSecurityTypeWarningFired)
+                {
+                    _invalidSecurityTypeWarningFired = true;
+                    Log.Trace($"{nameof(ThetaDataProvider)}.{nameof(ValidateHistoryRequest)}: Unsupported SecurityType '{historyRequest.Symbol.SecurityType}' for symbol '{historyRequest.Symbol}'");
+                }
+                return false;
+            }
+
+            if (historyRequest.StartTimeUtc >= historyRequest.EndTimeUtc)
+            {
+                if (!_invalidStartTimeWarningFired)
+                {
+                    _invalidStartTimeWarningFired = true;
+                    Log.Error($"{nameof(ThetaDataProvider)}.{nameof(ValidateHistoryRequest)}: Error - The start date in the history request must come before the end date. No historical data will be returned.");
+                }
+                return false;
+            }
+
+            if (historyRequest.Symbol.SecurityType == SecurityType.Option && historyRequest.TickType == TickType.OpenInterest && historyRequest.Resolution != Resolution.Daily)
+            {
+                if (!_invalidOpenInterestWarningFired)
+                {
+                    _invalidOpenInterestWarningFired = true;
+                    Log.Trace($"Invalid data request: TickType 'OpenInterest' only supports Resolution 'Daily' and SecurityType 'Option'. Requested: Resolution '{historyRequest.Resolution}', SecurityType '{historyRequest.Symbol.SecurityType}'.");
+                }
+                return false;
+            }
+
+            return true;
+        }
+
+        public IEnumerable<BaseData>? DownloadHistoryBulkData(HistoryRequest historyRequest)
+        {
+            if (!ValidateHistoryRequest(historyRequest))
+            {
+                return null;
+            }
+
+            switch (historyRequest.Symbol.SecurityType)
+            {
+                case SecurityType.Option:
+                    return GetOptionBulkHistoryData(historyRequest.Symbol, historyRequest.Resolution, historyRequest.StartTimeUtc, historyRequest.EndTimeUtc);
+                default:
+                    throw new NotSupportedException($"{nameof(ThetaDataProvider)}.{nameof(DownloadHistoryBulkData)}: Unsupported security type '{historyRequest.Symbol.SecurityType}'");
+            }
+        }
+
+        public static IEnumerable<(DateTime startDate, DateTime endDate)> SplitDateRange(DateTime start, DateTime end, int dayChunkSize)
+        {
+            DateTime chunkEnd;
+            while ((chunkEnd = start.AddDays(dayChunkSize)) < end)
+            {
+                yield return (start, chunkEnd);
+                start = chunkEnd;
+            }
+            yield return (start, end);
+        }
+
+        private IEnumerable<BaseData> GetOptionBulkHistoryData(Symbol optionSymbol, Resolution resolution, DateTime startDateUtc, DateTime endDateUtc)
+        {
+            var optionRestRequest = new RestRequest("/bulk_hist/option/quote", Method.GET);
+
+            var ticker = _symbolMapper.GetBrokerageSymbol(optionSymbol).Split(',');
+
+            optionRestRequest.AddQueryParameter("root", ticker[0]);
+            optionRestRequest.AddQueryParameter("exp", ticker[1]);
+            optionRestRequest.AddQueryParameter("ivl", GetIntervalsInMilliseconds(resolution));
+
+            var optionsSecurityType = optionSymbol.SecurityType == SecurityType.Index ? SecurityType.IndexOption : SecurityType.Option;
+            var optionStyle = optionsSecurityType.DefaultOptionStyle();
+            var period = resolution.ToTimeSpan();
+
+            foreach (var dates in SplitDateRange(startDateUtc, endDateUtc, 5))
+            {
+                optionRestRequest.AddOrUpdateParameter("start_date", dates.startDate.ConvertFromUtc(TimeZones.EasternStandard).ConvertToThetaDataDateFormat());
+                optionRestRequest.AddOrUpdateParameter("end_date", dates.endDate.ConvertFromUtc(TimeZones.EasternStandard).ConvertToThetaDataDateFormat());
+
+                foreach (var bulkQuote in _restApiClient.ExecuteRequest<BaseResponse<BulkQuoteResponse>>(optionRestRequest))
+                {
+                    foreach (var quotes in bulkQuote.Response)
+                    {
+                        var contract = _symbolMapper.GetLeanSymbol(quotes.Contract.Root, optionsSecurityType, optionSymbol.ID.Market, optionStyle,
+                        quotes.Contract.ExpirationDate, quotes.Contract.Strike, quotes.Contract.Right == "C" ? OptionRight.Call : OptionRight.Put, optionSymbol.Underlying);
+
+                        foreach (var quote in quotes.Quotes)
+                        {
+                            // If Ask/Bid - prices/sizes zero, low quote activity, empty result, low volatility.
+                            if (quote.AskPrice == 0 || quote.AskSize == 0 || quote.BidPrice == 0 || quote.BidSize == 0)
+                            {
+                                continue;
+                            }
+
+                            var bar = new QuoteBar(quote.DateTimeMilliseconds, contract, null, decimal.Zero, null, decimal.Zero, period);
+                            bar.UpdateQuote(quote.BidPrice, quote.BidSize, quote.AskPrice, quote.AskSize);
+                            yield return bar;
+                        }
+                    }
+                }
+            }
         }
 
         public IEnumerable<BaseData>? GetOptionHistoryData(RestRequest optionRequest, Symbol symbol, Resolution resolution, TickType tickType)
@@ -278,6 +358,36 @@ namespace QuantConnect.Lean.DataSource.ThetaData
                         continue;
                     }
                     yield return res(endOfDay.LastTradeDateTimeMilliseconds, endOfDay);
+                }
+            }
+        }
+
+        private IEnumerable<BaseData>? GetHistoricalOptionBulkQuoteData(Symbol underlying, TimeSpan resolution)
+        {
+            var request2 = new RestRequest("http://127.0.0.1:25510/v2/bulk_hist/option/quote", Method.GET);
+
+            request2.AddQueryParameter("root", "NVDA");
+            request2.AddQueryParameter("ivl", "60000");
+            request2.AddQueryParameter("exp", "20240426");
+            request2.AddQueryParameter("start_date", "20240301");
+            request2.AddQueryParameter("end_date", "20240401");
+
+            var optionsSecurityType = underlying.SecurityType == SecurityType.Index ? SecurityType.IndexOption : SecurityType.Option;
+            var optionStyle = optionsSecurityType.DefaultOptionStyle();
+
+            foreach (var bulkQuote in _restApiClient.ExecuteRequest<BaseResponse<BulkQuoteResponse>>(request2))
+            {
+                foreach (var quotes in bulkQuote.Response)
+                {
+                    var contract = _symbolMapper.GetLeanSymbol(quotes.Contract.Root, optionsSecurityType, underlying.ID.Market, optionStyle,
+                    quotes.Contract.ExpirationDate, quotes.Contract.Strike, quotes.Contract.Right == "C" ? OptionRight.Call : OptionRight.Put, underlying);
+
+                    foreach (var quote in quotes.Quotes)
+                    {
+                        var bar = new QuoteBar(quote.DateTimeMilliseconds, contract, null, decimal.Zero, null, decimal.Zero, resolution);
+                        bar.UpdateQuote(quote.BidPrice, quote.BidSize, quote.AskPrice, quote.AskSize);
+                        yield return bar;
+                    }
                 }
             }
         }

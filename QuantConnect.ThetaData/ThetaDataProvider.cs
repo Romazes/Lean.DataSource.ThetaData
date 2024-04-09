@@ -119,8 +119,6 @@ namespace QuantConnect.Lean.DataSource.ThetaData
             _subscriptionManager = new EventBasedDataQueueHandlerSubscriptionManager();
             _subscriptionManager.SubscribeImpl += (symbols, _) => _webSocketClient.Subscribe(symbols);
             _subscriptionManager.UnsubscribeImpl += (symbols, _) => _webSocketClient.Unsubscribe(symbols);
-
-            ValidateSubscription();
         }
 
         /// <summary>

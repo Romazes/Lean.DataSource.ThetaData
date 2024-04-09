@@ -37,12 +37,6 @@ namespace QuantConnect.Lean.DataSource.ThetaData
         private readonly ThetaDataRestApiClient _restApiClient;
 
         /// <summary>
-        /// Collection of pre-defined option rights.
-        /// Initialized for performance optimization as the API only returns strike price without indicating the right.
-        /// </summary>
-        private readonly IEnumerable<OptionRight> optionRights = new[] { OptionRight.Call, OptionRight.Put };
-
-        /// <summary>
         /// Indicates whether the warning for invalid <see cref="SecurityType"/> has been fired.
         /// </summary>
         private volatile bool _unsupportedSecurityTypeWarningFired;

@@ -18,6 +18,7 @@ using System;
 using System.Linq;
 using NUnit.Framework;
 using QuantConnect.Util;
+using System.Collections.Generic;
 
 namespace QuantConnect.Lean.DataSource.ThetaData.Tests
 {
@@ -26,7 +27,7 @@ namespace QuantConnect.Lean.DataSource.ThetaData.Tests
     [Explicit("This test requires the ThetaData terminal to be running in order to execute properly.")]
     public class ThetaDataDownloaderTests
     {
-        private ThetaDataDownloader _dataDownloader;
+        private CustomThetaDataDownloader _dataDownloader;
 
         [SetUp]
         public void SetUp()
@@ -73,6 +74,45 @@ namespace QuantConnect.Lean.DataSource.ThetaData.Tests
             var downloadedData = _dataDownloader.Get(parameters);
 
             TestHelpers.ValidateHistoricalBaseData(downloadedData, resolution, tickType, startDate, endDate);
+        }
+
+        [TestCase("NVDA", Resolution.Minute, TickType.Quote, "2024/01/02", "2024/04/08")]
+        [TestCase("NVDA", Resolution.Minute, TickType.Quote, "2024/01/02", "2024/02/02")]
+        public void GetBulkOptionContracts(string ticker, Resolution resolution, TickType tickType, DateTime startDate, DateTime endDate)
+        {
+            var symbol = TestHelpers.CreateSymbol(ticker, SecurityType.Equity);
+            var canonicalOption = Symbol.CreateCanonicalOption(symbol);
+
+            var parameters = new DataDownloaderGetParameters(canonicalOption, resolution, startDate, endDate, tickType);
+
+            var downloadedHistoricalData = _dataDownloader.Get(parameters).ToList();
+
+            Assert.IsNotEmpty(downloadedHistoricalData);
+        }
+
+        [TestCase("NVDA", "2024/01/02", "2024/04/08", 36)]
+        [TestCase("NVDA", "2024/01/02", "2024/02/01", 26)]
+        public void GetOptionContracts(string ticker, DateTime startDate, DateTime endData, int expectedAmount)
+        {
+            var symbol = Symbol.CreateCanonicalOption(TestHelpers.CreateSymbol(ticker, SecurityType.Equity));
+
+            var contracts = _dataDownloader.GetOptionContracts(symbol, startDate, endData).ToList();
+
+            var contractByDate = contracts.OrderBy(x => x.ID.Date).Select(x => x.ID.Date).Distinct().ToList();
+
+            Assert.IsNotEmpty(contracts);
+            Assert.IsNotEmpty(contractByDate);
+            Assert.That(contracts.Count, Is.EqualTo(expectedAmount));
+            Assert.That(contractByDate.Count, Is.EqualTo(expectedAmount));
+            Assert.That(contractByDate.Count, Is.EqualTo(contracts.Count));
+        }
+
+        public class CustomThetaDataDownloader : ThetaDataDownloader
+        {
+            public IEnumerable<Symbol> GetOptionContracts(Symbol symbol, DateTime startUtc, DateTime endUtc)
+            {
+                return base.GetOptions(symbol, startUtc, endUtc);
+            }
         }
     }
 }
